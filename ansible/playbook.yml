@@ -1,0 +1,269 @@
+---
+- hosts: all
+  become: yes
+  vars:
+    app_dir: /opt/logging_app
+    venv_dir: "{{ app_dir }}/venv"
+    backend_dir: "{{ app_dir }}/backend"
+    frontend_dir: "{{ app_dir }}/frontend"
+
+  tasks:
+    - name: Update all packages
+      yum:
+        name: '*'
+        state: latest
+        update_only: yes
+
+    - name: Install required packages
+      yum:
+        name:
+          - python3
+          - python3-pip
+          - nginx
+          - net-tools
+          - sqlite
+        state: present
+
+    - name: Install virtualenv
+      pip:
+        name: virtualenv
+        executable: pip3
+
+    - name: Create application directory
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Create virtual environment
+      command: python3 -m venv {{ venv_dir }}
+      args:
+        creates: "{{ venv_dir }}"
+
+    - name: Copy backend files
+      copy:
+        src: "{{ playbook_dir }}/../backend/"
+        dest: "{{ backend_dir }}"
+
+    - name: Install backend dependencies
+      pip:
+        requirements: "{{ backend_dir }}/requirements.txt"
+        virtualenv: "{{ venv_dir }}"
+
+    - name: Create backend app.py
+      copy:
+        content: |
+          import os
+          import sqlite3
+          from flask import Flask, request, jsonify, g
+          from werkzeug.serving import run_simple
+
+          app = Flask(__name__)
+
+          DATABASE = 'logs.db'
+
+          def get_db():
+              db = getattr(g, '_database', None)
+              if db is None:
+                  db = g._database = sqlite3.connect(DATABASE)
+              return db
+
+          @app.teardown_appcontext
+          def close_connection(exception):
+              db = getattr(g, '_database', None)
+              if db is not None:
+                  db.close()
+
+          @app.route('/log', methods=['POST'])
+          def log():
+              data = request.json
+              method = data.get('method')
+              status = data.get('status')
+              
+              db = get_db()
+              cursor = db.cursor()
+              cursor.execute('INSERT INTO logs (method, status) VALUES (?, ?)', (method, status))
+              db.commit()
+              
+              return jsonify({"message": "Log entry created"}), 201
+
+          @app.route('/logs', methods=['GET'])
+          def get_logs():
+              db = get_db()
+              cursor = db.cursor()
+              cursor.execute('SELECT * FROM logs')
+              logs = cursor.fetchall()
+              return jsonify(logs)
+
+          def application(environ, start_response):
+              return app(environ, start_response)
+
+          if __name__ == '__main__':
+              run_simple('0.0.0.0', 5001, application)
+        dest: "{{ backend_dir }}/app.py"
+
+    - name: Create backend wsgi.py
+      copy:
+        content: |
+          from app import app as application
+
+          if __name__ == "__main__":
+              application.run()
+        dest: "{{ backend_dir }}/wsgi.py"
+
+    - name: Install gunicorn
+      pip:
+        name: gunicorn
+        virtualenv: "{{ venv_dir }}"
+
+    - name: Create logs database
+      shell: |
+        source {{ venv_dir }}/bin/activate
+        python -c "import sqlite3; conn = sqlite3.connect('{{ backend_dir }}/logs.db'); \
+        conn.execute('CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, method TEXT, status TEXT)'); \
+        conn.close()"
+      args:
+        executable: /bin/bash
+
+    - name: Start backend application
+      shell: |
+        cd {{ backend_dir }}
+        source {{ venv_dir }}/bin/activate
+        nohup gunicorn --bind 0.0.0.0:5001 wsgi:application > {{ app_dir }}/backend.log 2>&1 &
+      args:
+        executable: /bin/bash
+      async: 1
+      poll: 0
+
+    - name: Wait for backend log file
+      wait_for:
+        path: "{{ app_dir }}/backend.log"
+        timeout: 10
+
+    - name: Display backend log
+      command: cat {{ app_dir }}/backend.log
+      register: backend_log
+
+    - name: Show backend log
+      debug:
+        var: backend_log.stdout_lines
+
+    - name: Wait for backend to start
+      wait_for:
+        port: 5001
+        timeout: 30
+      ignore_errors: yes
+
+    - name: Check if backend process is running
+      shell: pgrep -f "gunicorn.*wsgi:application" || echo "Not running"
+      register: backend_process
+
+    - name: Show backend process status
+      debug:
+        var: backend_process.stdout
+
+    - name: Check if port 5001 is in use
+      shell: netstat -tuln | grep :5001 || echo "Port not in use"
+      register: port_check
+
+    - name: Show port status
+      debug:
+        var: port_check.stdout
+
+    - name: Copy frontend files
+      copy:
+        src: "{{ playbook_dir }}/../frontend/"
+        dest: "{{ frontend_dir }}"
+
+    - name: Install frontend dependencies
+      pip:
+        requirements: "{{ frontend_dir }}/requirements.txt"
+        virtualenv: "{{ venv_dir }}"
+
+    - name: Start frontend application
+      shell: |
+        cd {{ frontend_dir }}
+        source {{ venv_dir }}/bin/activate
+        nohup python app.py > {{ app_dir }}/frontend.log 2>&1 &
+      args:
+        executable: /bin/bash
+      async: 1
+      poll: 0
+
+    - name: Wait for frontend log file
+      wait_for:
+        path: "{{ app_dir }}/frontend.log"
+        timeout: 10
+
+    - name: Display frontend log
+      command: cat {{ app_dir }}/frontend.log
+      register: frontend_log
+
+    - name: Show frontend log
+      debug:
+        var: frontend_log.stdout_lines
+
+    - name: Wait for frontend to start
+      wait_for:
+        port: 8001
+        timeout: 30
+      ignore_errors: yes
+
+    - name: Check if frontend process is running
+      shell: pgrep -f "python.*app.py" || echo "Not running"
+      register: frontend_process
+
+    - name: Show frontend process status
+      debug:
+        var: frontend_process.stdout
+
+    - name: Check if port 8001 is in use
+      shell: netstat -tuln | grep :8001 || echo "Port not in use"
+      register: frontend_port_check
+
+    - name: Show frontend port status
+      debug:
+        var: frontend_port_check.stdout
+
+    - name: Configure Nginx
+      template:
+        src: "{{ playbook_dir }}/../nginx/nginx.conf"
+        dest: /etc/nginx/nginx.conf
+      notify: Restart Nginx
+
+    - name: Test Nginx configuration
+      command: nginx -t
+      register: nginx_config_test
+      changed_when: false
+
+    - name: Display Nginx configuration test result
+      debug:
+        var: nginx_config_test.stdout
+      when: nginx_config_test.rc != 0
+
+    - name: Restart Nginx if configuration is valid
+      systemd:
+        name: nginx
+        state: restarted
+      when: nginx_config_test.rc == 0
+
+    - name: Ensure Nginx is started and enabled
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Check Nginx error log
+      command: tail -n 20 /var/log/nginx/error.log
+      register: nginx_error_log
+      ignore_errors: true
+
+    - name: Display Nginx error log
+      debug:
+        var: nginx_error_log.stdout_lines
+
+  handlers:
+    - name: Restart Nginx
+      systemd:
+        name: nginx
+        state: restarted

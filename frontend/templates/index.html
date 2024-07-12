@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Log Management System</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+        h1 { color: #333; }
+        form { margin-bottom: 20px; }
+        input, button { margin-right: 10px; padding: 5px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+    </style>
+</head>
+<body>
+    <h1>Log Management System</h1>
+    
+    <form id="logForm">
+        <input type="text" id="method" placeholder="Method" required>
+        <input type="text" id="status" placeholder="Status" required>
+        <input type="text" id="contentType" placeholder="Content Type">
+        <button type="submit">Add Log</button>
+    </form>
+
+    <table id="logTable">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Method</th>
+                <th>Status</th>
+                <th>Content Type</th>
+            </tr>
+        </thead>
+        <tbody>
+            <!-- Log entries will be inserted here -->
+        </tbody>
+    </table>
+
+    <script>
+        const logForm = document.getElementById('logForm');
+        const logTable = document.getElementById('logTable').getElementsByTagName('tbody')[0];
+        
+        function fetchLogs() {
+            fetch('/logs')
+                .then(response => response.json())
+                .then(logs => {
+                    logTable.innerHTML = '';
+                    logs.forEach(log => {
+                        const row = logTable.insertRow();
+                        row.insertCell(0).textContent = log.id;
+                        row.insertCell(1).textContent = log.method;
+                        row.insertCell(2).textContent = log.status;
+                        row.insertCell(3).textContent = log.content_type || '-';
+                    });
+                })
+                .catch(error => console.error('Error fetching logs:', error));
+        }
+
+        logForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+            const method = document.getElementById('method').value;
+            const status = document.getElementById('status').value;
+            const contentType = document.getElementById('contentType').value;
+            
+            fetch('/log', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ method, status, content_type: contentType }),
+            })
+            .then(response => response.json())
+            .then(data => {
+                fetchLogs();  // Refresh the logs after adding
+                logForm.reset();
+            })
+            .catch(error => console.error('Error adding log:', error));
+        });
+
+        // Initial fetch
+        fetchLogs();
+    </script>
+</body>
+</html>
